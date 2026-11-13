@@ -354,8 +354,9 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<"monitor" | "trades" | "cloud">("monitor");
   const [tradeFilter, setTradeFilter] = useState<"ALL" | "WIN" | "LOSS">("ALL");
 
-  const [activeEquity, setActiveEquity] = useState<number>(10000.0);
-  const [peakEquity, setPeakEquity] = useState<number>(10000.0);
+  const [startingEquity, setStartingEquity] = useState<number>(9965.73);
+  const [activeEquity, setActiveEquity] = useState<number>(9965.73);
+  const [peakEquity, setPeakEquity] = useState<number>(9965.73);
   const [vaultBalance, setVaultBalance] = useState<number>(0.0);
   const [principalSiphoned, setPrincipalSiphoned] = useState<boolean>(false);
   const [nextMilestone, setNextMilestone] = useState<number>(11500.0);
@@ -509,11 +510,12 @@ export default function App() {
     .reduce((acc, c) => acc + c.total_unrealized_pnl_inr + c.tp1_banked_pnl_inr, 0)
     .toFixed(2);
   const liveActiveEquity = +(activeEquity + unrealizedPnl).toFixed(2);
-  const currentPeak = Math.max(peakEquity, liveActiveEquity, 10000);
-  const protectedFloor = +(Math.max(10000, 0.75 * currentPeak)).toFixed(2);
+  const startCap = startingEquity > 0 ? startingEquity : 9965.73;
+  const currentPeak = Math.max(peakEquity, liveActiveEquity, startCap);
+  const protectedFloor = +(Math.max(startCap, 0.75 * currentPeak)).toFixed(2);
   const totalNetWorth = +(liveActiveEquity + vaultBalance).toFixed(2);
-  const totalReturnInr = +(totalNetWorth - 10000).toFixed(2);
-  const totalReturnPct = +(((totalNetWorth - 10000) / 10000) * 100).toFixed(2);
+  const totalReturnInr = +(totalNetWorth - startCap).toFixed(2);
+  const totalReturnPct = +(((totalNetWorth - startCap) / startCap) * 100).toFixed(2);
 
   const totalClosed = tradeHistory.length;
   const winsCount = tradeHistory.filter((t) => t.realized_pnl_inr > 0).length;
@@ -930,8 +932,11 @@ export default function App() {
                 });
                 return;
               }
-              setActiveEquity(data.realized_base_equity ?? data.active_equity ?? 10000);
-              setPeakEquity(data.kelly?.peak_equity ?? 10000);
+              if (typeof data.starting_equity === "number" && data.starting_equity > 0) {
+                setStartingEquity(data.starting_equity);
+              }
+              setActiveEquity(data.realized_base_equity ?? data.active_equity ?? 9965.73);
+              setPeakEquity(data.kelly?.peak_equity ?? data.active_equity ?? 9965.73);
               setVaultBalance(data.vault_balance ?? 0);
               setPrincipalSiphoned(Boolean(data.principal_siphoned));
               setNextMilestone(data.next_siphon_milestone ?? 20000);
@@ -1046,6 +1051,9 @@ export default function App() {
   };
 
   const handleResetPaperAccount = async () => {
+    setStartingEquity(9965.73);
+    setActiveEquity(9965.73);
+    setPeakEquity(9965.73);
     setActiveCampaigns([]);
     setTradeHistory([]);
     setPopupAlerts([]);
@@ -1194,7 +1202,7 @@ export default function App() {
           <div className="text-[11px] text-slate-400 flex items-center gap-3">
             <span>LAST TICK: <strong className="text-slate-200">{lastScanTime}</strong></span>
             <span>|</span>
-            <span>STARTING CAPITAL: <strong className="text-white">₹10,000.00</strong></span>
+            <span>STARTING CAPITAL: <strong className="text-white">₹{startCap.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</strong></span>
           </div>
         </div>
 
