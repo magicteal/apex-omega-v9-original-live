@@ -182,10 +182,11 @@ class AutonomousDaemonV9:
         return [], "OFFLINE"
 
     async def scan_and_execute_cycle(self) -> None:
-        # Automatically sync real Delta Exchange wallet balance on startup & whenever flat (every 60s)
-        if self.live_router.is_live() and not self.active_campaigns:
+        # 0. In LIVE execution mode: Synchronize real Delta Exchange wallet balance & live open positions
+        if self.live_router.is_live():
             now_b = time.time()
-            if now_b - float(getattr(self, "_last_bal_sync_ts", 0.0)) >= 60.0:
+            # Sync balance every 30s
+            if now_b - float(getattr(self, "_last_bal_sync_ts", 0.0)) >= 30.0:
                 self._last_bal_sync_ts = now_b
                 real_bal = await self.live_router.fetch_inr_balance()
                 if real_bal is not None and real_bal > 0:
@@ -195,6 +196,115 @@ class AutonomousDaemonV9:
                     if real_bal > float(self.state.get("peak_equity", 0.0)):
                         self.state["peak_equity"] = real_bal
                     self.save_state()
+
+            # Sync active open positions directly from Delta Exchange India
+            live_positions = await self.live_router.fetch_open_positions()
+            live_delta_syms = set()
+            for lp in live_positions:
+                d_sym = lp["delta_symbol"]
+                live_delta_syms.add(d_sym)
+
+                # Check if position is already tracked
+                existing = None
+                for c in self.active_campaigns:
+                    if c.get("delta_symbol") == d_sym or (d_sym and d_sym in c.get("delta_symbol", "")):
+                        existing = c
+                        break
+                    # Symbol substring match (e.g. LINK)
+                    c_base = c.get("symbol", "").split("/")[0]
+                    if c_base and c_base in d_sym:
+                        existing = c
+                        break
+
+                if existing:
+                    # Update live price, open PnL, notional, and highest extreme
+                    existing["current_price"] = lp["mark_price"]
+                    if existing["side"] == "LONG" and lp["mark_price"] > float(existing.get("highest_extreme", 0.0)):
+                        existing["highest_extreme"] = lp["mark_price"]
+                    elif existing["side"] == "SHORT" and lp["mark_price"] < float(existing.get("highest_extreme", 999999.0)):
+                        existing["highest_extreme"] = lp["mark_price"]
+                    existing["total_unrealized_pnl_inr"] = lp["unrealized_pnl_inr"]
+                    existing["total_notional_inr"] = lp["notional_inr"]
+                    existing["remaining_qty"] = lp["size"]
+                    if existing.get("tranches"):
+                        existing["tranches"][0]["unrealized_pnl_inr"] = lp["unrealized_pnl_inr"]
+                        existing["tranches"][0]["notional_inr"] = lp["notional_inr"]
+                else:
+                    # Adopt external position from Delta Exchange!
+                    matched_sym = None
+                    clean_sym = d_sym.replace("/", "").replace(":", "").upper()
+                    for d_pair, tkr, krk in UNIVERSE_MAP:
+                        p_base = d_pair.split("/")[0].upper()
+                        if p_base in clean_sym or krk.upper() in clean_sym or tkr.upper() in clean_sym:
+                            matched_sym = d_pair
+                            break
+                    if not matched_sym:
+                        matched_sym = f"{clean_sym}/USDT:USDT"
+
+                    entry_p = lp["entry_price"]
+                    mark_p = lp["mark_price"]
+                    side = lp["side"]
+                    notional_inr = lp["notional_inr"]
+                    unrl_pnl_inr = lp["unrealized_pnl_inr"]
+
+                    camp = {
+                        "campaign_id": f"DELTA-{clean_sym}",
+                        "trade_id": f"DELTA-{clean_sym}",
+                        "symbol": matched_sym,
+                        "delta_symbol": d_sym,
+                        "side": side,
+                        "setup_type": "DELTA_LIVE_SYNC",
+                        "confluence_score": 98,
+                        "entry_time": datetime.now(timezone.utc).isoformat(),
+                        "entry_ts": time.time(),
+                        "base_entry_price": entry_p,
+                        "current_price": mark_p,
+                        "highest_extreme": mark_p,
+                        "atr_at_entry": round(entry_p * 0.015, 4),
+                        "effective_stop": round(entry_p * (0.988 if side == "LONG" else 1.012), 4),
+                        "chandelier_stop": round(entry_p * (0.988 if side == "LONG" else 1.012), 4),
+                        "breakeven_locked": False,
+                        "breakeven_stop": None,
+                        "tp1_price": round(entry_p * (1.0068 if side == "LONG" else 0.9932), 4),
+                        "tp1_hit": False,
+                        "tp1_banked_pnl_inr": 0.0,
+                        "filled_units": 1,
+                        "max_stage_reached": "V9_SNIPER_OPEN",
+                        "total_notional_inr": notional_inr,
+                        "total_unrealized_pnl_inr": unrl_pnl_inr,
+                        "rvol_at_entry": 1.25,
+                        "live_qty": lp["size"],
+                        "remaining_qty": lp["size"],
+                        "stop_order_id": None,
+                        "is_delta_live_position": True,
+                        "tranches": [
+                            {
+                                "id": 1,
+                                "label": "DELTA_LIVE_CORE",
+                                "weight_pct": 1.0,
+                                "filled": True,
+                                "fill_price": entry_p,
+                                "notional_inr": notional_inr,
+                                "unrealized_pnl_inr": unrl_pnl_inr,
+                                "fee_inr": 0.0,
+                            }
+                        ],
+                    }
+                    self.active_campaigns.append(camp)
+                    self.save_state()
+                    print(f"[DELTA_LIVE_SYNC] Adopted live position: {d_sym} {side} {lp['size']} lots @ {entry_p} (Unrealized PnL: ₹{unrl_pnl_inr})")
+
+            # Check if any live-adopted campaigns were closed on Delta Exchange
+            for c in list(self.active_campaigns):
+                if c.get("is_delta_live_position") and c.get("delta_symbol"):
+                    d_sym = c["delta_symbol"]
+                    if d_sym not in live_delta_syms and not any(d_sym in s for s in live_delta_syms):
+                        exit_p = c.get("current_price", c["base_entry_price"])
+                        self.close_campaign(c, exit_price=exit_p, reason="DELTA_EXCHANGE_MANUAL_OR_STOP_CLOSE")
+                        real_bal = await self.live_router.fetch_inr_balance()
+                        if real_bal is not None and real_bal > 0:
+                            self.state["active_equity"] = real_bal
+                            self.save_state()
 
         loop = asyncio.get_running_loop()
         for display_sym, ticker, kraken_pair in UNIVERSE_MAP:
@@ -668,12 +778,17 @@ async def start_background_scanner() -> None:
 @app.api_route("/health", methods=["GET", "HEAD"])
 @app.api_route("/api/ping", methods=["GET", "HEAD"])
 async def health_check() -> Dict[str, Any]:
+    unrealized = sum(float(c.get("total_unrealized_pnl_inr", 0.0)) + float(c.get("tp1_banked_pnl_inr", 0.0)) for c in daemon.active_campaigns)
     return {
         "status": "ONLINE_24_7",
         "version": "9.0.0",
         "uptime_seconds": int(time.time() - BOOT_TIME),
         "last_scan_ts": daemon.last_scan_ts,
-        "active_equity_inr": daemon.state["active_equity"],
+        "active_equity_inr": round(float(daemon.state["active_equity"]) + unrealized, 2),
+        "realized_base_equity": round(float(daemon.state["active_equity"]), 2),
+        "unrealized_pnl_inr": round(unrealized, 2),
+        "open_positions": len(daemon.active_campaigns),
+        "active_campaign_symbols": [c.get("symbol") for c in daemon.active_campaigns],
         "wins": daemon.state["wins"],
         "losses": daemon.state["losses"],
         "win_rate_pct": daemon.state["win_rate_pct"],

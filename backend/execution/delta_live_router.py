@@ -75,6 +75,80 @@ class DeltaIndiaLiveRouter:
             print(f"[DELTA_LIVE_ERR] fetch_inr_balance(): {e}")
         return None
 
+    async def fetch_open_positions(self) -> list:
+        """Fetches active open positions directly from Delta Exchange India."""
+        if not await self.ensure_ready():
+            return []
+        try:
+            positions = []
+            try:
+                positions = await self.exchange.fetch_positions()
+            except Exception as e:
+                # Direct Delta API fallback
+                try:
+                    res = await self.exchange.request("positions/margined", "private", "GET", {})
+                    positions = res.get("result", []) if isinstance(res, dict) else []
+                except Exception as e2:
+                    print(f"[DELTA_LIVE_ERR] direct request failed: {e2}")
+
+            self.last_error = None
+            active = []
+            for p in positions:
+                info = p.get("info") if isinstance(p, dict) and "info" in p else (p if isinstance(p, dict) else {})
+                size = 0.0
+                try:
+                    size = float(p.get("contracts") or p.get("size") or info.get("size") or 0.0)
+                except (ValueError, TypeError):
+                    size = 0.0
+
+                if abs(size) > 0:
+                    sym = p.get("symbol") or info.get("product_symbol") or ""
+                    side = p.get("side")
+                    if not side:
+                        side = "LONG" if size > 0 else "SHORT"
+                    side = str(side).upper()
+
+                    entry_p = 0.0
+                    try:
+                        entry_p = float(p.get("entryPrice") or info.get("entry_price") or 0.0)
+                    except (ValueError, TypeError):
+                        entry_p = 0.0
+
+                    mark_p = entry_p
+                    try:
+                        mark_p = float(p.get("markPrice") or info.get("mark_price") or entry_p)
+                    except (ValueError, TypeError):
+                        mark_p = entry_p
+
+                    unrl_pnl_usd = 0.0
+                    try:
+                        unrl_pnl_usd = float(p.get("unrealizedPnl") or info.get("unrealized_pnl") or 0.0)
+                    except (ValueError, TypeError):
+                        unrl_pnl_usd = 0.0
+
+                    notional_usd = 0.0
+                    try:
+                        notional_usd = float(p.get("notional") or (abs(size) * mark_p))
+                    except (ValueError, TypeError):
+                        notional_usd = abs(size) * mark_p
+
+                    active.append({
+                        "delta_symbol": sym,
+                        "side": side,
+                        "size": abs(size),
+                        "entry_price": entry_p,
+                        "mark_price": mark_p,
+                        "unrealized_pnl_usd": unrl_pnl_usd,
+                        "unrealized_pnl_inr": round(unrl_pnl_usd * self.usd_inr_rate, 2),
+                        "notional_usd": notional_usd,
+                        "notional_inr": round(notional_usd * self.usd_inr_rate, 2),
+                    })
+            return active
+        except Exception as e:
+            self.last_error = str(e)
+            print(f"[DELTA_LIVE_ERR] fetch_open_positions(): {e}")
+            return []
+
     async def open_live_trade(
         self,
         scanner_symbol: str,
