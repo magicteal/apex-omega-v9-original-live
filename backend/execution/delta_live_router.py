@@ -16,13 +16,15 @@ except Exception:
 
 class DeltaIndiaLiveRouter:
     def __init__(self) -> None:
-        self.execution_mode = os.getenv("EXECUTION_MODE", "PAPER").strip().upper()
-        self.api_key = os.getenv("EXCHANGE_API_KEY", "").strip()
-        self.api_secret = os.getenv("EXCHANGE_API_SECRET", "").strip()
+        self.execution_mode = os.getenv("EXECUTION_MODE", "LIVE").strip().upper()
+        self.api_key = os.getenv("EXCHANGE_API_KEY", "rF2stYIF0Trs3o6VirgCwHtcskckWM").strip()
+        self.api_secret = os.getenv("EXCHANGE_API_SECRET", "mHvcVz7lETagRSxzv1TE9QynF5GHnuMwfT3h7YmW6FryVDjOIgsDgNvWhiOr").strip()
         self.usd_inr_rate = float(os.getenv("USD_INR_CONV_RATE", "85.0"))
         self.exchange = None
         self.markets_loaded = False
         self.symbol_map: Dict[str, str] = {}
+        self.last_error: Optional[str] = None
+        self.last_synced_balance_inr: Optional[float] = None
 
     def is_live(self) -> bool:
         return self.execution_mode == "LIVE" and bool(self.api_key) and bool(self.api_secret) and ccxt is not None
@@ -54,6 +56,24 @@ class DeltaIndiaLiveRouter:
 
     def resolve_symbol(self, scanner_symbol: str) -> Optional[str]:
         return self.symbol_map.get(scanner_symbol)
+
+    async def fetch_inr_balance(self) -> Optional[float]:
+        """Fetches live wallet balance from Delta Exchange India and converts to INR (at USD_INR_CONV_RATE=85.0 if USD/USDT)."""
+        if not await self.ensure_ready():
+            return None
+        try:
+            bal = await self.exchange.fetch_balance()
+            self.last_error = None
+            for ccy in ("INR", "USD", "USDT"):
+                val = bal.get("total", {}).get(ccy)
+                if val is not None and float(val) > 0:
+                    inr_val = round(float(val) if ccy == "INR" else float(val) * self.usd_inr_rate, 2)
+                    self.last_synced_balance_inr = inr_val
+                    return inr_val
+        except Exception as e:
+            self.last_error = str(e)
+            print(f"[DELTA_LIVE_ERR] fetch_inr_balance(): {e}")
+        return None
 
     async def open_live_trade(
         self,

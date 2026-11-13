@@ -47,6 +47,17 @@ UNIVERSE_MAP = [
 STATE_PATH = Path(__file__).parent / "bot_state.json"
 BOOT_TIME = time.time()
 
+def _detect_outbound_ip() -> str:
+    try:
+        req = urllib.request.Request("https://api.ipify.org", headers={"User-Agent": "ApexOmegaV9/9.0"})
+        with urllib.request.urlopen(req, timeout=3.0) as resp:
+            return resp.read().decode("utf-8").strip()
+    except Exception:
+        return "UNKNOWN"
+
+SERVER_OUTBOUND_IP = _detect_outbound_ip()
+
+
 app = FastAPI(title="APEX-OMEGA OS V9.0 Dual-Core Hyper-Compounder", version="9.0.0")
 app.add_middleware(
     CORSMiddleware,
@@ -99,7 +110,7 @@ class AutonomousDaemonV9:
             except Exception:
                 pass
         return {
-            "mode": os.getenv("EXECUTION_MODE", "PAPER").strip().upper(),
+            "mode": os.getenv("EXECUTION_MODE", "LIVE").strip().upper(),
             "starting_equity": float(os.getenv("STARTING_EQUITY_INR", "10000.0")),
             "active_equity": float(os.getenv("STARTING_EQUITY_INR", "10000.0")),
             "peak_equity": float(os.getenv("STARTING_EQUITY_INR", "10000.0")),
@@ -171,6 +182,20 @@ class AutonomousDaemonV9:
         return [], "OFFLINE"
 
     async def scan_and_execute_cycle(self) -> None:
+        # Automatically sync real Delta Exchange wallet balance on startup & whenever flat (every 60s)
+        if self.live_router.is_live() and not self.active_campaigns:
+            now_b = time.time()
+            if now_b - float(getattr(self, "_last_bal_sync_ts", 0.0)) >= 60.0:
+                self._last_bal_sync_ts = now_b
+                real_bal = await self.live_router.fetch_inr_balance()
+                if real_bal is not None and real_bal > 0:
+                    if self.state.get("total_closed_trades", 0) == 0:
+                        self.state["starting_equity"] = real_bal
+                    self.state["active_equity"] = real_bal
+                    if real_bal > float(self.state.get("peak_equity", 0.0)):
+                        self.state["peak_equity"] = real_bal
+                    self.save_state()
+
         loop = asyncio.get_running_loop()
         for display_sym, ticker, kraken_pair in UNIVERSE_MAP:
             ohlcv, src = await loop.run_in_executor(None, self._fetch_multi_exchange_klines, ticker, kraken_pair)
@@ -190,13 +215,21 @@ class AutonomousDaemonV9:
                 self._update_campaign(camp, live_item["price"])
                 if self.live_router.is_live() and camp.get("delta_symbol"):
                     if camp not in self.active_campaigns:
-                        # Campaign was closed by Stage 4, 25m Scratch, or Ratchet/Stop -> close on Delta Exchange!
+                        # Campaign was closed by Stage 4, 25m Scratch, or Ratchet/Stop -> close on Delta Exchange & sync real wallet balance!
                         await self.live_router.close_live_trade(
                             camp["delta_symbol"],
                             camp["side"],
                             float(camp.get("remaining_qty") or camp.get("live_qty") or 0.0),
                             camp.get("stop_order_id"),
                         )
+                        real_bal = await self.live_router.fetch_inr_balance()
+                        if real_bal is not None and real_bal > 0:
+                            self.state["active_equity"] = real_bal
+                            if real_bal > float(self.state.get("peak_equity", 0.0)):
+                                self.state["peak_equity"] = real_bal
+                            if self.state.get("trade_history"):
+                                self.state["trade_history"][0]["balance_after_inr"] = real_bal
+                            self.save_state()
                     else:
                         new_stage = camp.get("ratchet_stage", 0)
                         new_stop = camp.get("effective_stop")
@@ -579,6 +612,9 @@ class AutonomousDaemonV9:
             "uptime_seconds": int(time.time() - BOOT_TIME),
             "last_scan_ts": self.last_scan_ts,
             "mode": "LIVE" if self.live_router.is_live() else self.state.get("mode", "PAPER"),
+            "server_outbound_ip": SERVER_OUTBOUND_IP,
+            "delta_wallet_inr": self.live_router.last_synced_balance_inr,
+            "delta_api_error": self.live_router.last_error,
             "starting_equity": float(os.getenv("STARTING_EQUITY_INR", "10000.0")),
             "active_equity": live_active,
             "realized_base_equity": round(float(self.state["active_equity"]), 2),
@@ -641,6 +677,10 @@ async def health_check() -> Dict[str, Any]:
         "wins": daemon.state["wins"],
         "losses": daemon.state["losses"],
         "win_rate_pct": daemon.state["win_rate_pct"],
+        "execution_mode": "LIVE" if daemon.live_router.is_live() else "PAPER",
+        "delta_wallet_inr": daemon.live_router.last_synced_balance_inr,
+        "delta_api_error": daemon.live_router.last_error,
+        "server_outbound_ip": SERVER_OUTBOUND_IP,
     }
 
 
@@ -736,5 +776,6 @@ else:
             "status": "ONLINE_24_7",
             "version": "9.0.0",
             "service": "APEX-OMEGA OS V9.0 Original Live Backend",
-            "dashboard_note": "Build frontend to static/ to serve HTML dashboard directly."
+            "dashboard_note": "Build frontend to static/ to serve HTML dashboard directly.",
+            "server_outbound_ip": SERVER_OUTBOUND_IP
         }

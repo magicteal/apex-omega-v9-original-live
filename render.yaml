@@ -1,12 +1,24 @@
 services:
   - type: web
     name: apex-omega-v9-original-live
-    env: python
-    plan: free
+    runtime: python
+    rootDir: backend
     buildCommand: pip install -r requirements.txt
-    startCommand: python -m uvicorn main:app --host 0.0.0.0 --port $PORT
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.9
       - key: EXECUTION_MODE
-        value: PAPER
+        value: LIVE
+      - key: EXCHANGE_DRIVER
+        value: delta
+      - key: STARTING_EQUITY_INR
+        value: "10000.0"
+      - key: EXCHANGE_API_KEY
+        value: "rF2stYIF0Trs3o6VirgCwHtcskckWM"
+      - key: EXCHANGE_API_SECRET
+        value: "mHvcVz7lETagRSxzv1TE9QynF5GHnuMwfT3h7YmW6FryVDjOIgsDgNvWhiOr"
+      - key: USD_INR_CONV_RATE
+        value: "85.0"
+      - key: MAX_DAILY_LOSS_INR
+        value: "600.0"
