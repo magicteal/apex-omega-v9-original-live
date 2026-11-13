@@ -77,7 +77,7 @@ class DeltaIndiaLiveRouter:
             pos_task = asyncio.create_task(self.exchange.fetch_positions())
             bal, positions = await asyncio.gather(bal_task, pos_task, return_exceptions=True)
 
-            inr_bal = None
+            inr_bal = self.last_synced_balance_inr
             if isinstance(bal, dict):
                 self.last_error = None
                 for ccy in ("INR", "USD", "USDT"):
@@ -89,8 +89,11 @@ class DeltaIndiaLiveRouter:
             elif isinstance(bal, Exception):
                 self.last_error = str(bal)
 
-            pos_map: Dict[str, Dict[str, Any]] = {}
-            if isinstance(positions, list):
+            if isinstance(positions, Exception):
+                self.last_error = str(positions)
+                pos_map = self.live_positions_cache
+            elif isinstance(positions, list):
+                pos_map: Dict[str, Dict[str, Any]] = {}
                 for p in positions:
                     contracts = float(p.get("contracts") or p.get("size") or p.get("info", {}).get("size") or 0.0)
                     if abs(contracts) > 0:
@@ -120,7 +123,10 @@ class DeltaIndiaLiveRouter:
                             "notional_usd": notional_usd,
                             "notional_inr": notional_inr,
                         }
-            self.live_positions_cache = pos_map
+                self.live_positions_cache = pos_map
+            else:
+                pos_map = self.live_positions_cache
+
             return {"balance_inr": inr_bal, "positions": pos_map}
         except Exception as e:
             self.last_error = str(e)
