@@ -1,3 +1,4 @@
+import websockets
 """
 APEX-OMEGA OS V9.0 — Dual-Core Hyper-Compounder & 5-Stage Asymmetric Ratchet
 Built from Forensic Analysis of All 143 Live Trades across V6 & V7/V8:
@@ -893,6 +894,75 @@ daemon = AutonomousDaemonV9()
 
 @app.on_event("startup")
 async def start_background_scanner() -> None:
+    async def delta_ws_stream_loop():
+        # Connects directly to Delta Exchange India public WebSocket for sub-100ms mark price & PnL ticks
+        while True:
+            try:
+                active_symbols = set()
+                for c in daemon.active_campaigns:
+                    ds = c.get("delta_symbol")
+                    if ds:
+                        clean = ds.replace("/", "").replace(":", "")
+                        if clean.endswith("USDUSD"):
+                            clean = clean[:-3]
+                        active_symbols.add(clean)
+
+                if not active_symbols:
+                    await asyncio.sleep(1.0)
+                    continue
+
+                url = "wss://socket.india.delta.exchange"
+                async with websockets.connect(url, ping_interval=20, ping_timeout=10) as ws:
+                    sub_msg = {
+                        "type": "subscribe",
+                        "payload": {
+                            "channels": [
+                                {
+                                    "name": "v2/ticker",
+                                    "symbols": list(active_symbols)
+                                }
+                            ]
+                        }
+                    }
+                    await ws.send(json.dumps(sub_msg))
+                    while True:
+                        msg = await ws.recv()
+                        data = json.loads(msg)
+                        if data.get("type") == "v2/ticker":
+                            sym = data.get("symbol")
+                            mark_p_raw = data.get("mark_price")
+                            if mark_p_raw is not None:
+                                mark_p = float(mark_p_raw)
+                                for c in daemon.active_campaigns:
+                                    c_ds = c.get("delta_symbol", "").replace("/", "").replace(":", "")
+                                    if c_ds.endswith("USDUSD"):
+                                        c_ds = c_ds[:-3]
+                                    if c_ds == sym:
+                                        c["current_price"] = mark_p
+                                        entry_p = float(c.get("base_entry_price") or mark_p)
+                                        side = c.get("side", "LONG").upper()
+                                        size = float(c.get("remaining_qty") or c.get("live_qty") or 1.0)
+                                        direction = 1.0 if side == "LONG" else -1.0
+                                        pnl_usd = round(direction * (mark_p - entry_p) * size, 4)
+                                        pnl_inr = round(pnl_usd * 85.0, 2)
+                                        pnl_pct = round(((mark_p - entry_p) / entry_p) * 100 * direction, 2)
+                                        c["total_unrealized_pnl_inr"] = pnl_inr
+                                        c["unrealized_pnl_usd"] = pnl_usd
+                                        c["return_pct"] = pnl_pct
+                                        c["total_notional_inr"] = round(size * mark_p * 85.0, 2)
+                                        if c.get("tranches"):
+                                            c["tranches"][0]["unrealized_pnl_inr"] = pnl_inr
+                                            c["tranches"][0]["notional_inr"] = round(size * mark_p * 85.0, 2)
+
+                                payload = daemon.build_payload()
+                                for client_ws in list(daemon.clients):
+                                    try:
+                                        await client_ws.send_json(payload)
+                                    except Exception:
+                                        pass
+            except Exception:
+                await asyncio.sleep(1.0)
+
     async def delta_live_fast_loop():
         # Ultra-fast 1.0s dedicated loop for Delta Exchange India live positions
         while True:
@@ -932,6 +1002,7 @@ async def start_background_scanner() -> None:
                 print(f"[SCANNER_LOOP_ERR] {e}")
             await asyncio.sleep(2.5)
 
+    asyncio.create_task(delta_ws_stream_loop())
     asyncio.create_task(delta_live_fast_loop())
     asyncio.create_task(market_scanner_loop())
 
