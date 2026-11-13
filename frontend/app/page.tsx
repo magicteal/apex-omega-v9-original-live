@@ -395,8 +395,8 @@ export default function App() {
   const [activePopup, setActivePopup] = useState<TradePopupAlert | null>(null);
   const [selectedTradeModal, setSelectedTradeModal] = useState<ClosedTradeRecord | null>(null);
 
-  const [renderUrlInput, setRenderUrlInput] = useState<string>("");
-  const [renderUrl, setRenderUrl] = useState<string>("");
+  const [renderUrlInput, setRenderUrlInput] = useState<string>(DEFAULT_RENDER_BACKEND_URL);
+  const [renderUrl, setRenderUrl] = useState<string>(DEFAULT_RENDER_BACKEND_URL);
   const [feedBadge, setFeedBadge] = useState<string>("CONNECTING TO LIVE FEED...");
   const [lastScanTime, setLastScanTime] = useState<string>("Syncing...");
 
@@ -685,6 +685,10 @@ export default function App() {
   // Evaluate Open V9 Campaign on Every Real Market Price Update (5-Stage Asymmetric Ratchet)
   const evaluateOpenCampaignOnTick = useCallback(
     (camp: ActiveCampaign, livePrice: number) => {
+      if ((camp as any).is_delta_live_position || (camp as any).delta_symbol) {
+        // Delta Exchange Live Position: strictly preserve 1:1 Delta Exchange India mark price and PnL
+        return;
+      }
       const side = camp.side;
       const direction = side === "LONG" ? 1.0 : -1.0;
       const entryP = camp.base_entry_price;
@@ -980,6 +984,9 @@ export default function App() {
         // 1. Update all currently open trade slots (up to 3 simultaneous positions)
         const openCamps = stateRef.current.activeCampaigns;
         openCamps.forEach((camp) => {
+          if ((camp as any).is_delta_live_position || (camp as any).delta_symbol) {
+            return; // 1:1 Live Delta position: do not run local spot evaluation
+          }
           const match = liveSignals.find((s) => s.symbol === camp.symbol);
           if (match) {
             evaluateOpenCampaignOnTick(camp, match.price);

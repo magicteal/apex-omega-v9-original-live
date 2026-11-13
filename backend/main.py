@@ -315,8 +315,11 @@ class AutonomousDaemonV9:
 
         self.last_scan_ts = datetime.now(timezone.utc).isoformat()
 
-        # 1. Update all currently open campaigns (and sync live Delta Exchange stops/exits if EXECUTION_MODE=LIVE)
+        # 1. Update all currently open campaigns (skip Bybit re-calc for live Delta positions)
         for camp in list(self.active_campaigns):
+            if camp.get("is_delta_live_position") or (self.live_router.is_live() and camp.get("delta_symbol")):
+                # Live Delta position: PnL, mark price & notional are synced 1:1 directly from Delta Exchange India!
+                continue
             sym = camp["symbol"]
             live_item = self.scanner_cache.get(sym)
             if live_item:
@@ -593,6 +596,9 @@ class AutonomousDaemonV9:
             self.close_campaign(camp, exit_price=live_price, reason=reason)
             return
 
+        if camp.get("is_delta_live_position") or (self.live_router.is_live() and camp.get("delta_symbol")):
+            # Do not overwrite Delta Exchange India's exact reported PnL with Bybit spot math!
+            return
         pct_move = direction * ((live_price - entry_p) / max(entry_p, 1e-12))
         if camp.get("tp1_hit"):
             runner_notional = notional * 0.50
