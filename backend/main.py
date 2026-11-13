@@ -181,6 +181,133 @@ class AutonomousDaemonV9:
 
         return [], "OFFLINE"
 
+    async def sync_delta_live_state(self) -> None:
+        if not self.live_router.is_live():
+            return
+
+        now_b = time.time()
+        if now_b - float(getattr(self, "_last_bal_sync_ts", 0.0)) >= 15.0:
+            self._last_bal_sync_ts = now_b
+            try:
+                real_bal = await self.live_router.fetch_inr_balance()
+                if real_bal is not None and real_bal > 0:
+                    if self.state.get("total_closed_trades", 0) == 0:
+                        self.state["starting_equity"] = real_bal
+                    self.state["active_equity"] = real_bal
+                    if real_bal > float(self.state.get("peak_equity", 0.0)):
+                        self.state["peak_equity"] = real_bal
+                    self.save_state()
+            except Exception as e:
+                print(f"[DELTA_LIVE_ERR] balance sync: {e}")
+
+        try:
+            live_positions = await self.live_router.fetch_open_positions()
+        except Exception as e:
+            print(f"[DELTA_LIVE_ERR] fetch_open_positions: {e}")
+            return
+
+        live_delta_syms = set()
+        for lp in live_positions:
+            d_sym = lp["delta_symbol"]
+            live_delta_syms.add(d_sym)
+
+            existing = None
+            for c in self.active_campaigns:
+                if c.get("delta_symbol") == d_sym or (d_sym and d_sym in c.get("delta_symbol", "")):
+                    existing = c
+                    break
+                c_base = c.get("symbol", "").split("/")[0]
+                if c_base and c_base in d_sym:
+                    existing = c
+                    break
+
+            if existing:
+                existing["current_price"] = lp["mark_price"]
+                if existing["side"] == "LONG" and lp["mark_price"] > float(existing.get("highest_extreme", 0.0)):
+                    existing["highest_extreme"] = lp["mark_price"]
+                elif existing["side"] == "SHORT" and lp["mark_price"] < float(existing.get("highest_extreme", 999999.0)):
+                    existing["highest_extreme"] = lp["mark_price"]
+                existing["total_unrealized_pnl_inr"] = lp["unrealized_pnl_inr"]
+                existing["total_notional_inr"] = lp["notional_inr"]
+                existing["remaining_qty"] = lp["size"]
+                if existing.get("tranches"):
+                    existing["tranches"][0]["unrealized_pnl_inr"] = lp["unrealized_pnl_inr"]
+                    existing["tranches"][0]["notional_inr"] = lp["notional_inr"]
+            else:
+                matched_sym = None
+                clean_sym = d_sym.replace("/", "").replace(":", "").upper()
+                for d_pair, tkr, krk in UNIVERSE_MAP:
+                    p_base = d_pair.split("/")[0].upper()
+                    if p_base in clean_sym or krk.upper() in clean_sym or tkr.upper() in clean_sym:
+                        matched_sym = d_pair
+                        break
+                if not matched_sym:
+                    matched_sym = f"{clean_sym}/USDT:USDT"
+
+                entry_p = lp["entry_price"]
+                mark_p = lp["mark_price"]
+                side = lp["side"]
+                notional_inr = lp["notional_inr"]
+                unrl_pnl_inr = lp["unrealized_pnl_inr"]
+
+                camp = {
+                    "campaign_id": f"DELTA-{clean_sym}",
+                    "trade_id": f"DELTA-{clean_sym}",
+                    "symbol": matched_sym,
+                    "delta_symbol": d_sym,
+                    "side": side,
+                    "setup_type": "DELTA_LIVE_SYNC",
+                    "confluence_score": 98,
+                    "entry_time": datetime.now(timezone.utc).isoformat(),
+                    "entry_ts": time.time(),
+                    "base_entry_price": entry_p,
+                    "current_price": mark_p,
+                    "highest_extreme": mark_p,
+                    "atr_at_entry": round(entry_p * 0.015, 4),
+                    "effective_stop": round(entry_p * (0.988 if side == "LONG" else 1.012), 4),
+                    "chandelier_stop": round(entry_p * (0.988 if side == "LONG" else 1.012), 4),
+                    "breakeven_locked": False,
+                    "breakeven_stop": None,
+                    "tp1_price": round(entry_p * (1.0068 if side == "LONG" else 0.9932), 4),
+                    "tp1_hit": False,
+                    "tp1_banked_pnl_inr": 0.0,
+                    "filled_units": 1,
+                    "max_stage_reached": "V9_SNIPER_OPEN",
+                    "total_notional_inr": notional_inr,
+                    "total_unrealized_pnl_inr": unrl_pnl_inr,
+                    "rvol_at_entry": 1.25,
+                    "live_qty": lp["size"],
+                    "remaining_qty": lp["size"],
+                    "stop_order_id": None,
+                    "is_delta_live_position": True,
+                    "tranches": [
+                        {
+                            "id": 1,
+                            "label": "DELTA_LIVE_CORE",
+                            "weight_pct": 1.0,
+                            "filled": True,
+                            "fill_price": entry_p,
+                            "notional_inr": notional_inr,
+                            "unrealized_pnl_inr": unrl_pnl_inr,
+                            "fee_inr": 0.0,
+                        }
+                    ],
+                }
+                self.active_campaigns.append(camp)
+                self.save_state()
+                print(f"[DELTA_LIVE_SYNC] Fast adopted: {d_sym} {side} {lp['size']} lots @ {entry_p} (Unrealized PnL: {unrl_pnl_inr})")
+
+        for c in list(self.active_campaigns):
+            if c.get("is_delta_live_position") and c.get("delta_symbol"):
+                d_sym = c["delta_symbol"]
+                if d_sym not in live_delta_syms and not any(d_sym in s for s in live_delta_syms):
+                    exit_p = c.get("current_price", c["base_entry_price"])
+                    self.close_campaign(c, exit_price=exit_p, reason="DELTA_EXCHANGE_MANUAL_OR_STOP_CLOSE")
+                    real_bal = await self.live_router.fetch_inr_balance()
+                    if real_bal is not None and real_bal > 0:
+                        self.state["active_equity"] = real_bal
+                        self.save_state()
+
     async def scan_and_execute_cycle(self) -> None:
         # 0. In LIVE execution mode: Synchronize real Delta Exchange wallet balance & live open positions
         if self.live_router.is_live():
@@ -307,11 +434,16 @@ class AutonomousDaemonV9:
                             self.save_state()
 
         loop = asyncio.get_running_loop()
-        for display_sym, ticker, kraken_pair in UNIVERSE_MAP:
-            ohlcv, src = await loop.run_in_executor(None, self._fetch_multi_exchange_klines, ticker, kraken_pair)
-            if ohlcv and len(ohlcv) >= 30:
-                sig = self.squeeze_engine.evaluate_ohlcv(display_sym, ohlcv, feed_source=src)
-                self.scanner_cache[display_sym] = sig.to_dict()
+        async def _fetch_one_market(d_sym, tkr, krk):
+            try:
+                ohlcv, src = await loop.run_in_executor(None, self._fetch_multi_exchange_klines, tkr, krk)
+                if ohlcv and len(ohlcv) >= 30:
+                    sig = self.squeeze_engine.evaluate_ohlcv(d_sym, ohlcv, feed_source=src)
+                    self.scanner_cache[d_sym] = sig.to_dict()
+            except Exception:
+                pass
+
+        await asyncio.gather(*(_fetch_one_market(d, t, k) for d, t, k in UNIVERSE_MAP), return_exceptions=True)
 
         self.last_scan_ts = datetime.now(timezone.utc).isoformat()
 
@@ -761,24 +893,47 @@ daemon = AutonomousDaemonV9()
 
 @app.on_event("startup")
 async def start_background_scanner() -> None:
-    async def loop():
+    async def delta_live_fast_loop():
+        # Ultra-fast 1.0s dedicated loop for Delta Exchange India live positions
+        while True:
+            try:
+                if daemon.live_router.is_live():
+                    await daemon.sync_delta_live_state()
+                    payload = daemon.build_payload()
+                    dead = []
+                    for ws in list(daemon.clients):
+                        try:
+                            await ws.send_json(payload)
+                        except Exception:
+                            dead.append(ws)
+                    for ws in dead:
+                        if ws in daemon.clients:
+                            daemon.clients.remove(ws)
+            except Exception as e:
+                print(f"[DELTA_LIVE_LOOP_ERR] {e}")
+            await asyncio.sleep(1.0)
+
+    async def market_scanner_loop():
+        # Parallel 10-pair quantitative scanner loop
         while True:
             try:
                 await daemon.scan_and_execute_cycle()
                 payload = daemon.build_payload()
                 dead = []
-                for ws in daemon.clients:
+                for ws in list(daemon.clients):
                     try:
                         await ws.send_json(payload)
                     except Exception:
                         dead.append(ws)
-                for ws in dead:
-                    daemon.clients.remove(ws)
-            except Exception:
-                pass
-            await asyncio.sleep(5.0)
+                    for ws in dead:
+                        if ws in daemon.clients:
+                            daemon.clients.remove(ws)
+            except Exception as e:
+                print(f"[SCANNER_LOOP_ERR] {e}")
+            await asyncio.sleep(2.5)
 
-    asyncio.create_task(loop())
+    asyncio.create_task(delta_live_fast_loop())
+    asyncio.create_task(market_scanner_loop())
 
 
 @app.api_route("/health", methods=["GET", "HEAD"])
@@ -804,6 +959,21 @@ async def health_check() -> Dict[str, Any]:
         "server_outbound_ip": SERVER_OUTBOUND_IP,
     }
 
+
+@app.websocket("/ws")
+async def websocket_endpoint(ws: WebSocket):
+    await ws.accept()
+    daemon.clients.append(ws)
+    try:
+        # Send instant real-time snapshot on connect
+        await ws.send_json(daemon.build_payload())
+        while True:
+            await ws.receive_text()
+    except (WebSocketDisconnect, Exception):
+        pass
+    finally:
+        if ws in daemon.clients:
+            daemon.clients.remove(ws)
 
 @app.get("/api/state")
 async def get_full_state() -> Dict[str, Any]:

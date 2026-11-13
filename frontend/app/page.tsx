@@ -1033,11 +1033,47 @@ export default function App() {
       }
     };
 
+    // Fast Real-Time WebSocket stream (Zero-Lag Push)
+    let ws: WebSocket | null = null;
+    if (renderUrl && typeof window !== "undefined") {
+      try {
+        const wsUrl = renderUrl.replace(/^http/, "ws") + "/ws";
+        ws = new WebSocket(wsUrl);
+        ws.onmessage = (event) => {
+          if (!active) return;
+          try {
+            const data = JSON.parse(event.data);
+            if (data && Array.isArray(data.scanner)) {
+              setFeedBadge("RENDER 24/7 CLOUD DAEMON SYNCED (ZERO-LAG WS)");
+              if (typeof data.starting_equity === "number" && data.starting_equity > 0) {
+                setStartingEquity(data.starting_equity);
+              }
+              setActiveEquity(data.realized_base_equity ?? data.active_equity ?? 9965.73);
+              setPeakEquity(data.kelly?.peak_equity ?? data.active_equity ?? 9965.73);
+              setVaultBalance(data.vault_balance ?? 0);
+              setPrincipalSiphoned(Boolean(data.principal_siphoned));
+              setNextMilestone(data.next_siphon_milestone ?? 20000);
+              setScanner(data.scanner);
+              if (Array.isArray(data.active_campaigns)) setActiveCampaigns(data.active_campaigns);
+              else setActiveCampaigns(data.pyramid ? [data.pyramid] : []);
+              if (Array.isArray(data.trade_history)) setTradeHistory(data.trade_history);
+              setLastScanTime(new Date().toLocaleTimeString());
+            }
+          } catch {}
+        };
+      } catch {}
+    }
+
     runScan();
-    const timer = setInterval(runScan, 4000);
+    const timer = setInterval(runScan, 1000);
     return () => {
       active = false;
       clearInterval(timer);
+      if (ws) {
+        try {
+          ws.close();
+        } catch {}
+      }
     };
   }, [renderUrl, fetchPairKlinesMultiExchange, enterNewTrade, evaluateOpenCampaignOnTick]);
 
