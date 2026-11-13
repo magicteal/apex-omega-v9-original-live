@@ -909,7 +909,7 @@ export default function App() {
             if (Array.isArray(data.scanner) && data.scanner.length > 0) {
               setFeedBadge("RENDER 24/7 CLOUD DAEMON SYNCED");
               // Loophole Fix 5: If Render container restarted (0 closed trades on server) while browser has saved trades, auto-restore to Render!
-              if ((data.total_closed_trades ?? 0) === 0 && stateRef.current.tradeHistory.length > 0) {
+              if (data.mode !== "LIVE" && (data.total_closed_trades ?? 0) === 0 && stateRef.current.tradeHistory.length > 0) {
                 const restoreUrl = [renderUrl, "api", "restore-state"].join("/");
                 const localWins = stateRef.current.tradeHistory.filter((t) => t.realized_pnl_inr > 0);
                 const localLosses = stateRef.current.tradeHistory.filter((t) => t.realized_pnl_inr <= 0);
@@ -1045,16 +1045,29 @@ export default function App() {
     }
   };
 
-  const handleResetPaperAccount = () => {
-    setActiveEquity(10000.0);
-    setPeakEquity(10000.0);
-    setVaultBalance(0.0);
-    setPrincipalSiphoned(false);
-    setNextMilestone(20000.0);
+  const handleResetPaperAccount = async () => {
     setActiveCampaigns([]);
     setTradeHistory([]);
     setPopupAlerts([]);
     setActivePopup(null);
+    try {
+      localStorage.removeItem(STORAGE_KEY);
+    } catch {}
+
+    if (renderUrl) {
+      try {
+        const resetEndpoint = [renderUrl, "api", "reset"].join("/");
+        const res = await fetch(resetEndpoint, { method: "POST" });
+        if (res.ok) {
+          const json = await res.json();
+          const t = json.telemetry;
+          if (t) {
+            setActiveEquity(t.realized_base_equity ?? t.active_equity ?? 10000);
+            setPeakEquity(t.kelly?.peak_equity ?? t.active_equity ?? 10000);
+          }
+        }
+      } catch {}
+    }
   };
 
   return (

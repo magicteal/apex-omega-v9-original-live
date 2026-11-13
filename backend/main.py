@@ -615,13 +615,13 @@ class AutonomousDaemonV9:
             "server_outbound_ip": SERVER_OUTBOUND_IP,
             "delta_wallet_inr": self.live_router.last_synced_balance_inr,
             "delta_api_error": self.live_router.last_error,
-            "starting_equity": float(os.getenv("STARTING_EQUITY_INR", "10000.0")),
+            "starting_equity": float(self.state.get("starting_equity") or os.getenv("STARTING_EQUITY_INR", "10000.0")),
             "active_equity": live_active,
             "realized_base_equity": round(float(self.state["active_equity"]), 2),
             "unrealized_pnl_inr": round(unrealized, 2),
             "vault_balance": 0.0,
             "total_net_worth": total_net_worth,
-            "total_return_pct": round(((total_net_worth - 10000.0) / 10000.0) * 100.0, 2),
+            "total_return_pct": round(((total_net_worth - float(self.state.get("starting_equity") or os.getenv("STARTING_EQUITY_INR", "10000.0"))) / max(float(self.state.get("starting_equity") or os.getenv("STARTING_EQUITY_INR", "10000.0")), 1.0)) * 100.0, 2),
             "principal_siphoned": False,
             "next_siphon_milestone": 1000000.0,
             "wins": self.state.get("wins", 0),
@@ -702,8 +702,11 @@ async def emergency_flatten() -> Dict[str, Any]:
 @app.post("/api/reset")
 async def reset_account() -> Dict[str, Any]:
     daemon.active_campaigns = []
-    daemon.state["active_equity"] = 10000.0
-    daemon.state["peak_equity"] = 10000.0
+    real_bal = await daemon.live_router.fetch_inr_balance() if daemon.live_router.is_live() else None
+    base_equity = real_bal if (real_bal is not None and real_bal > 0) else float(os.getenv("STARTING_EQUITY_INR", "10000.0"))
+    daemon.state["starting_equity"] = base_equity
+    daemon.state["active_equity"] = base_equity
+    daemon.state["peak_equity"] = base_equity
     daemon.state["vault_balance"] = 0.0
     daemon.state["principal_siphoned"] = False
     daemon.state["consecutive_losses"] = 0
@@ -741,6 +744,8 @@ class RestoreStateRequest(BaseModel):
 
 @app.post("/api/restore-state")
 async def restore_server_state(req: RestoreStateRequest) -> Dict[str, Any]:
+    if daemon.live_router.is_live():
+        return {"status": "LIVE_MODE_RESTORE_IGNORED", "telemetry": daemon.build_payload()}
     if daemon.state.get("total_closed_trades", 0) == 0 and req.total_closed_trades > 0:
         daemon.state["active_equity"] = round(req.active_equity, 2)
         daemon.state["peak_equity"] = round(req.peak_equity, 2)
