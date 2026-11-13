@@ -103,10 +103,13 @@ class DeltaIndiaLiveRouter:
 
                 if abs(size) > 0:
                     sym = p.get("symbol") or info.get("product_symbol") or ""
-                    side = p.get("side")
-                    if not side:
-                        side = "LONG" if size > 0 else "SHORT"
-                    side = str(side).upper()
+                    raw_side = str(p.get("side") or "").upper()
+                    if raw_side in ("BUY", "LONG", "B"):
+                        side = "LONG"
+                    elif raw_side in ("SELL", "SHORT", "S"):
+                        side = "SHORT"
+                    else:
+                        side = "LONG" if size > 0 else "SHORT" 
 
                     entry_p = 0.0
                     try:

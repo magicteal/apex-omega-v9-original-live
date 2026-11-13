@@ -223,17 +223,31 @@ class AutonomousDaemonV9:
                     break
 
             if existing:
-                existing["current_price"] = lp["mark_price"]
-                if existing["side"] == "LONG" and lp["mark_price"] > float(existing.get("highest_extreme", 0.0)):
-                    existing["highest_extreme"] = lp["mark_price"]
-                elif existing["side"] == "SHORT" and lp["mark_price"] < float(existing.get("highest_extreme", 999999.0)):
-                    existing["highest_extreme"] = lp["mark_price"]
-                existing["total_unrealized_pnl_inr"] = lp["unrealized_pnl_inr"]
-                existing["total_notional_inr"] = lp["notional_inr"]
-                existing["remaining_qty"] = lp["size"]
+                mark_p = float(lp["mark_price"])
+                entry_p = float(existing.get("base_entry_price") or mark_p)
+                raw_side = str(existing.get("side") or "").upper()
+                side = "LONG" if raw_side in ("BUY", "LONG", "B") else "SHORT"
+                existing["side"] = side
+                direction = 1.0 if side == "LONG" else -1.0
+                size = float(existing.get("remaining_qty") or existing.get("live_qty") or lp["size"])
+                pnl_usd = round(direction * (mark_p - entry_p) * size, 4)
+                pnl_inr = round(pnl_usd * 85.0, 2)
+                pnl_pct = round(((mark_p - entry_p) / max(entry_p, 1e-9)) * 100 * direction, 2)
+
+                existing["current_price"] = mark_p
+                if side == "LONG" and mark_p > float(existing.get("highest_extreme", 0.0)):
+                    existing["highest_extreme"] = mark_p
+                elif side == "SHORT" and mark_p < float(existing.get("highest_extreme", 999999.0)):
+                    existing["highest_extreme"] = mark_p
+                existing["total_unrealized_pnl_inr"] = pnl_inr
+                existing["unrealized_pnl_usd"] = pnl_usd
+                existing["return_pct"] = pnl_pct
+                existing["total_notional_inr"] = round(size * mark_p * 85.0, 2)
+                existing["notional_usd"] = round(size * mark_p, 2)
+                existing["remaining_qty"] = size
                 if existing.get("tranches"):
-                    existing["tranches"][0]["unrealized_pnl_inr"] = lp["unrealized_pnl_inr"]
-                    existing["tranches"][0]["notional_inr"] = lp["notional_inr"]
+                    existing["tranches"][0]["unrealized_pnl_inr"] = pnl_inr
+                    existing["tranches"][0]["notional_inr"] = round(size * mark_p * 85.0, 2)
             else:
                 matched_sym = None
                 clean_sym = d_sym.replace("/", "").replace(":", "").upper()
@@ -245,11 +259,16 @@ class AutonomousDaemonV9:
                 if not matched_sym:
                     matched_sym = f"{clean_sym}/USDT:USDT"
 
-                entry_p = lp["entry_price"]
-                mark_p = lp["mark_price"]
-                side = lp["side"]
-                notional_inr = lp["notional_inr"]
-                unrl_pnl_inr = lp["unrealized_pnl_inr"]
+                entry_p = float(lp["entry_price"])
+                mark_p = float(lp["mark_price"])
+                raw_side = str(lp.get("side") or "").upper()
+                side = "LONG" if raw_side in ("BUY", "LONG", "B") else "SHORT"
+                direction = 1.0 if side == "LONG" else -1.0
+                size = float(lp["size"])
+                pnl_usd = round(direction * (mark_p - entry_p) * size, 4)
+                unrl_pnl_inr = round(pnl_usd * 85.0, 2)
+                pnl_pct = round(((mark_p - entry_p) / max(entry_p, 1e-9)) * 100 * direction, 2)
+                notional_inr = round(size * mark_p * 85.0, 2)
 
                 camp = {
                     "campaign_id": f"DELTA-{clean_sym}",
@@ -940,7 +959,9 @@ async def start_background_scanner() -> None:
                                     if c_ds == sym:
                                         c["current_price"] = mark_p
                                         entry_p = float(c.get("base_entry_price") or mark_p)
-                                        side = c.get("side", "LONG").upper()
+                                        raw_side = str(c.get("side") or "").upper()
+                                        side = "LONG" if raw_side in ("BUY", "LONG", "B") else "SHORT"
+                                        c["side"] = side
                                         size = float(c.get("remaining_qty") or c.get("live_qty") or 1.0)
                                         direction = 1.0 if side == "LONG" else -1.0
                                         pnl_usd = round(direction * (mark_p - entry_p) * size, 4)

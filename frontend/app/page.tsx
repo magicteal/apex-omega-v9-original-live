@@ -945,7 +945,26 @@ export default function App() {
               setPrincipalSiphoned(Boolean(data.principal_siphoned));
               setNextMilestone(data.next_siphon_milestone ?? 20000);
               setScanner(data.scanner);
-              if (Array.isArray(data.active_campaigns)) setActiveCampaigns(data.active_campaigns);
+              if (Array.isArray(data.active_campaigns)) {
+                setActiveCampaigns((prev) => {
+                  if (prev.length !== data.active_campaigns.length) return data.active_campaigns;
+                  // If same position exists and was updated live by direct Delta WebSocket, do not downgrade
+                  return data.active_campaigns.map((newC: any, idx: number) => {
+                    const oldC = prev[idx];
+                    if (oldC && (oldC as any).delta_symbol === newC.delta_symbol && typeof (oldC as any).current_price === "number") {
+                      return {
+                        ...newC,
+                        current_price: oldC.current_price,
+                        total_unrealized_pnl_inr: oldC.total_unrealized_pnl_inr,
+                        unrealized_pnl_usd: (oldC as any).unrealized_pnl_usd ?? newC.unrealized_pnl_usd,
+                        return_pct: (oldC as any).return_pct ?? newC.return_pct,
+                        total_notional_inr: oldC.total_notional_inr,
+                      };
+                    }
+                    return newC;
+                  });
+                });
+              }
               else setActiveCampaigns(data.pyramid ? [data.pyramid] : []);
               if (Array.isArray(data.trade_history)) setTradeHistory(data.trade_history);
               setLastScanTime(new Date().toLocaleTimeString());
@@ -1054,7 +1073,26 @@ export default function App() {
               setPrincipalSiphoned(Boolean(data.principal_siphoned));
               setNextMilestone(data.next_siphon_milestone ?? 20000);
               setScanner(data.scanner);
-              if (Array.isArray(data.active_campaigns)) setActiveCampaigns(data.active_campaigns);
+              if (Array.isArray(data.active_campaigns)) {
+                setActiveCampaigns((prev) => {
+                  if (prev.length !== data.active_campaigns.length) return data.active_campaigns;
+                  // If same position exists and was updated live by direct Delta WebSocket, do not downgrade
+                  return data.active_campaigns.map((newC: any, idx: number) => {
+                    const oldC = prev[idx];
+                    if (oldC && (oldC as any).delta_symbol === newC.delta_symbol && typeof (oldC as any).current_price === "number") {
+                      return {
+                        ...newC,
+                        current_price: oldC.current_price,
+                        total_unrealized_pnl_inr: oldC.total_unrealized_pnl_inr,
+                        unrealized_pnl_usd: (oldC as any).unrealized_pnl_usd ?? newC.unrealized_pnl_usd,
+                        return_pct: (oldC as any).return_pct ?? newC.return_pct,
+                        total_notional_inr: oldC.total_notional_inr,
+                      };
+                    }
+                    return newC;
+                  });
+                });
+              }
               else setActiveCampaigns(data.pyramid ? [data.pyramid] : []);
               if (Array.isArray(data.trade_history)) setTradeHistory(data.trade_history);
               setLastScanTime(new Date().toLocaleTimeString());
@@ -1117,7 +1155,9 @@ export default function App() {
                   if ((c as any).delta_symbol || (c as any).is_delta_live_position) {
                     const entryP = c.base_entry_price;
                     const size = (c as any).remaining_qty || (c as any).live_qty || 76;
-                    const direction = c.side === "LONG" ? 1.0 : -1.0;
+                    const rawSide = String(c.side || "").toUpperCase();
+                    const isLong = rawSide === "LONG" || rawSide === "BUY" || rawSide === "B";
+                    const direction = isLong ? 1.0 : -1.0;
                     const pnlUsd = direction * (liveMark - entryP) * size;
                     const pnlInr = +(pnlUsd * 85.0).toFixed(2);
                     const returnPct = +(((liveMark - entryP) / entryP) * 100 * direction).toFixed(2);
