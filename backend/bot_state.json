@@ -1,8 +1,8 @@
 {
-  "mode": "LIVE",
-  "starting_equity": 9965.73,
-  "active_equity": 9965.73,
-  "peak_equity": 9965.73,
+  "mode": "PAPER",
+  "starting_equity": 10000.0,
+  "active_equity": 10000.0,
+  "peak_equity": 10000.0,
   "vault_balance": 0.0,
   "principal_siphoned": false,
   "next_siphon_milestone": 1000000.0,
