@@ -354,9 +354,8 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<"monitor" | "trades" | "cloud">("monitor");
   const [tradeFilter, setTradeFilter] = useState<"ALL" | "WIN" | "LOSS">("ALL");
 
-  const [startingEquity, setStartingEquity] = useState<number>(9965.73);
-  const [activeEquity, setActiveEquity] = useState<number>(9965.73);
-  const [peakEquity, setPeakEquity] = useState<number>(9965.73);
+  const [activeEquity, setActiveEquity] = useState<number>(10000.0);
+  const [peakEquity, setPeakEquity] = useState<number>(10000.0);
   const [vaultBalance, setVaultBalance] = useState<number>(0.0);
   const [principalSiphoned, setPrincipalSiphoned] = useState<boolean>(false);
   const [nextMilestone, setNextMilestone] = useState<number>(11500.0);
@@ -395,8 +394,8 @@ export default function App() {
   const [activePopup, setActivePopup] = useState<TradePopupAlert | null>(null);
   const [selectedTradeModal, setSelectedTradeModal] = useState<ClosedTradeRecord | null>(null);
 
-  const [renderUrlInput, setRenderUrlInput] = useState<string>(DEFAULT_RENDER_BACKEND_URL);
-  const [renderUrl, setRenderUrl] = useState<string>(DEFAULT_RENDER_BACKEND_URL);
+  const [renderUrlInput, setRenderUrlInput] = useState<string>("");
+  const [renderUrl, setRenderUrl] = useState<string>("");
   const [feedBadge, setFeedBadge] = useState<string>("CONNECTING TO LIVE FEED...");
   const [lastScanTime, setLastScanTime] = useState<string>("Syncing...");
 
@@ -429,14 +428,7 @@ export default function App() {
         typeof process !== "undefined" && process.env && process.env.NEXT_PUBLIC_API_URL
           ? process.env.NEXT_PUBLIC_API_URL
           : "";
-      const originUrl =
-        typeof window !== "undefined" &&
-        window.location.hostname !== "localhost" &&
-        window.location.hostname !== "127.0.0.1" &&
-        window.location.origin.startsWith("http")
-          ? window.location.origin
-          : "";
-      const savedUrl = localStorage.getItem(RENDER_URL_KEY) || envUrl || originUrl || DEFAULT_RENDER_BACKEND_URL || "";
+      const savedUrl = localStorage.getItem(RENDER_URL_KEY) || envUrl || DEFAULT_RENDER_BACKEND_URL || "";
       if (savedUrl) {
         const cleaned = savedUrl.replace(/\/+$/, "");
         setRenderUrl(cleaned);
@@ -510,12 +502,11 @@ export default function App() {
     .reduce((acc, c) => acc + c.total_unrealized_pnl_inr + c.tp1_banked_pnl_inr, 0)
     .toFixed(2);
   const liveActiveEquity = +(activeEquity + unrealizedPnl).toFixed(2);
-  const startCap = startingEquity > 0 ? startingEquity : 9965.73;
-  const currentPeak = Math.max(peakEquity, liveActiveEquity, startCap);
-  const protectedFloor = +(Math.max(startCap, 0.75 * currentPeak)).toFixed(2);
+  const currentPeak = Math.max(peakEquity, liveActiveEquity, 10000);
+  const protectedFloor = +(Math.max(10000, 0.75 * currentPeak)).toFixed(2);
   const totalNetWorth = +(liveActiveEquity + vaultBalance).toFixed(2);
-  const totalReturnInr = +(totalNetWorth - startCap).toFixed(2);
-  const totalReturnPct = +(((totalNetWorth - startCap) / startCap) * 100).toFixed(2);
+  const totalReturnInr = +(totalNetWorth - 10000).toFixed(2);
+  const totalReturnPct = +(((totalNetWorth - 10000) / 10000) * 100).toFixed(2);
 
   const totalClosed = tradeHistory.length;
   const winsCount = tradeHistory.filter((t) => t.realized_pnl_inr > 0).length;
@@ -685,10 +676,6 @@ export default function App() {
   // Evaluate Open V9 Campaign on Every Real Market Price Update (5-Stage Asymmetric Ratchet)
   const evaluateOpenCampaignOnTick = useCallback(
     (camp: ActiveCampaign, livePrice: number) => {
-      if ((camp as any).is_delta_live_position || (camp as any).delta_symbol) {
-        // Delta Exchange Live Position: strictly preserve 1:1 Delta Exchange India mark price and PnL
-        return;
-      }
       const side = camp.side;
       const direction = side === "LONG" ? 1.0 : -1.0;
       const entryP = camp.base_entry_price;
@@ -915,7 +902,7 @@ export default function App() {
             if (Array.isArray(data.scanner) && data.scanner.length > 0) {
               setFeedBadge("RENDER 24/7 CLOUD DAEMON SYNCED");
               // Loophole Fix 5: If Render container restarted (0 closed trades on server) while browser has saved trades, auto-restore to Render!
-              if (data.mode !== "LIVE" && (data.total_closed_trades ?? 0) === 0 && stateRef.current.tradeHistory.length > 0) {
+              if ((data.total_closed_trades ?? 0) === 0 && stateRef.current.tradeHistory.length > 0) {
                 const restoreUrl = [renderUrl, "api", "restore-state"].join("/");
                 const localWins = stateRef.current.tradeHistory.filter((t) => t.realized_pnl_inr > 0);
                 const localLosses = stateRef.current.tradeHistory.filter((t) => t.realized_pnl_inr <= 0);
@@ -936,35 +923,13 @@ export default function App() {
                 });
                 return;
               }
-              if (typeof data.starting_equity === "number" && data.starting_equity > 0) {
-                setStartingEquity(data.starting_equity);
-              }
-              setActiveEquity(data.realized_base_equity ?? data.active_equity ?? 9965.73);
-              setPeakEquity(data.kelly?.peak_equity ?? data.active_equity ?? 9965.73);
+              setActiveEquity(data.realized_base_equity ?? data.active_equity ?? 10000);
+              setPeakEquity(data.kelly?.peak_equity ?? 10000);
               setVaultBalance(data.vault_balance ?? 0);
               setPrincipalSiphoned(Boolean(data.principal_siphoned));
               setNextMilestone(data.next_siphon_milestone ?? 20000);
               setScanner(data.scanner);
-              if (Array.isArray(data.active_campaigns)) {
-                setActiveCampaigns((prev) => {
-                  if (prev.length !== data.active_campaigns.length) return data.active_campaigns;
-                  // If same position exists and was updated live by direct Delta WebSocket, do not downgrade
-                  return data.active_campaigns.map((newC: any, idx: number) => {
-                    const oldC = prev[idx];
-                    if (oldC && (oldC as any).delta_symbol === newC.delta_symbol && typeof (oldC as any).current_price === "number") {
-                      return {
-                        ...newC,
-                        current_price: oldC.current_price,
-                        total_unrealized_pnl_inr: oldC.total_unrealized_pnl_inr,
-                        unrealized_pnl_usd: (oldC as any).unrealized_pnl_usd ?? newC.unrealized_pnl_usd,
-                        return_pct: (oldC as any).return_pct ?? newC.return_pct,
-                        total_notional_inr: oldC.total_notional_inr,
-                      };
-                    }
-                    return newC;
-                  });
-                });
-              }
+              if (Array.isArray(data.active_campaigns)) setActiveCampaigns(data.active_campaigns);
               else setActiveCampaigns(data.pyramid ? [data.pyramid] : []);
               if (Array.isArray(data.trade_history)) setTradeHistory(data.trade_history);
               setLastScanTime(new Date().toLocaleTimeString());
@@ -1003,9 +968,6 @@ export default function App() {
         // 1. Update all currently open trade slots (up to 3 simultaneous positions)
         const openCamps = stateRef.current.activeCampaigns;
         openCamps.forEach((camp) => {
-          if ((camp as any).is_delta_live_position || (camp as any).delta_symbol) {
-            return; // 1:1 Live Delta position: do not run local spot evaluation
-          }
           const match = liveSignals.find((s) => s.symbol === camp.symbol);
           if (match) {
             evaluateOpenCampaignOnTick(camp, match.price);
@@ -1052,150 +1014,13 @@ export default function App() {
       }
     };
 
-    // Fast Real-Time WebSocket stream (Zero-Lag Push)
-    let ws: WebSocket | null = null;
-    if (renderUrl && typeof window !== "undefined") {
-      try {
-        const wsUrl = renderUrl.replace(/^http/, "ws") + "/ws";
-        ws = new WebSocket(wsUrl);
-        ws.onmessage = (event) => {
-          if (!active) return;
-          try {
-            const data = JSON.parse(event.data);
-            if (data && Array.isArray(data.scanner)) {
-              setFeedBadge("RENDER 24/7 CLOUD DAEMON SYNCED (ZERO-LAG WS)");
-              if (typeof data.starting_equity === "number" && data.starting_equity > 0) {
-                setStartingEquity(data.starting_equity);
-              }
-              setActiveEquity(data.realized_base_equity ?? data.active_equity ?? 9965.73);
-              setPeakEquity(data.kelly?.peak_equity ?? data.active_equity ?? 9965.73);
-              setVaultBalance(data.vault_balance ?? 0);
-              setPrincipalSiphoned(Boolean(data.principal_siphoned));
-              setNextMilestone(data.next_siphon_milestone ?? 20000);
-              setScanner(data.scanner);
-              if (Array.isArray(data.active_campaigns)) {
-                setActiveCampaigns((prev) => {
-                  if (prev.length !== data.active_campaigns.length) return data.active_campaigns;
-                  // If same position exists and was updated live by direct Delta WebSocket, do not downgrade
-                  return data.active_campaigns.map((newC: any, idx: number) => {
-                    const oldC = prev[idx];
-                    if (oldC && (oldC as any).delta_symbol === newC.delta_symbol && typeof (oldC as any).current_price === "number") {
-                      return {
-                        ...newC,
-                        current_price: oldC.current_price,
-                        total_unrealized_pnl_inr: oldC.total_unrealized_pnl_inr,
-                        unrealized_pnl_usd: (oldC as any).unrealized_pnl_usd ?? newC.unrealized_pnl_usd,
-                        return_pct: (oldC as any).return_pct ?? newC.return_pct,
-                        total_notional_inr: oldC.total_notional_inr,
-                      };
-                    }
-                    return newC;
-                  });
-                });
-              }
-              else setActiveCampaigns(data.pyramid ? [data.pyramid] : []);
-              if (Array.isArray(data.trade_history)) setTradeHistory(data.trade_history);
-              setLastScanTime(new Date().toLocaleTimeString());
-            }
-          } catch {}
-        };
-      } catch {}
-    }
-
     runScan();
-    const timer = setInterval(runScan, 1000);
+    const timer = setInterval(runScan, 2000);
     return () => {
       active = false;
       clearInterval(timer);
-      if (ws) {
-        try {
-          ws.close();
-        } catch {}
-      }
     };
   }, [renderUrl, fetchPairKlinesMultiExchange, enterNewTrade, evaluateOpenCampaignOnTick]);
-
-  // ZERO-LAG DIRECT DELTA EXCHANGE WEBSOCKET (Sub-10ms direct feed from Delta India)
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    const deltaCamp = activeCampaigns.find((c) => (c as any).delta_symbol || (c as any).is_delta_live_position);
-    if (!deltaCamp) return;
-
-    let deltaWs: WebSocket | null = null;
-    let isSubscribed = true;
-
-    try {
-      const dSym = ((deltaCamp as any).delta_symbol || "LINK/USD:USD")
-        .replace(/[\/:]/g, "")
-        .replace(/USDUSD$/, "USD");
-
-      deltaWs = new WebSocket("wss://socket.india.delta.exchange");
-      deltaWs.onopen = () => {
-        if (!isSubscribed || !deltaWs) return;
-        deltaWs.send(
-          JSON.stringify({
-            type: "subscribe",
-            payload: {
-              channels: [{ name: "v2/ticker", symbols: [dSym] }],
-            },
-          })
-        );
-      };
-
-      deltaWs.onmessage = (evt) => {
-        if (!isSubscribed) return;
-        try {
-          const msg = JSON.parse(evt.data);
-          if (msg.type === "v2/ticker" && msg.mark_price) {
-            const liveMark = parseFloat(msg.mark_price);
-            if (!isNaN(liveMark) && liveMark > 0) {
-              setActiveCampaigns((prev) => {
-                if (!prev.length) return prev;
-                return prev.map((c) => {
-                  if ((c as any).delta_symbol || (c as any).is_delta_live_position) {
-                    const entryP = c.base_entry_price;
-                    const size = (c as any).remaining_qty || (c as any).live_qty || 76;
-                    const rawSide = String(c.side || "").toUpperCase();
-                    const isLong = rawSide === "LONG" || rawSide === "BUY" || rawSide === "B";
-                    const direction = isLong ? 1.0 : -1.0;
-                    const pnlUsd = direction * (liveMark - entryP) * size;
-                    const pnlInr = +(pnlUsd * 85.0).toFixed(2);
-                    const returnPct = +(((liveMark - entryP) / entryP) * 100 * direction).toFixed(2);
-                    const notionalInr = +(size * liveMark * 85.0).toFixed(2);
-                    const notionalUsd = +(size * liveMark).toFixed(2);
-                    return {
-                      ...c,
-                      current_price: liveMark,
-                      total_unrealized_pnl_inr: pnlInr,
-                      unrealized_pnl_usd: +pnlUsd.toFixed(4),
-                      return_pct: returnPct,
-                      total_notional_inr: notionalInr,
-                      notional_usd: notionalUsd,
-                      tranches: c.tranches?.map((tr) => ({
-                        ...tr,
-                        unrealized_pnl_inr: pnlInr,
-                        notional_inr: notionalInr,
-                      })),
-                    };
-                  }
-                  return c;
-                });
-              });
-            }
-          }
-        } catch {}
-      };
-    } catch {}
-
-    return () => {
-      isSubscribed = false;
-      if (deltaWs) {
-        try {
-          deltaWs.close();
-        } catch {}
-      }
-    };
-  }, [activeCampaigns.length > 0 ? (activeCampaigns[0] as any).delta_symbol : null]);
 
   const filteredTrades = tradeHistory.filter((t) => {
     if (tradeFilter === "WIN") return t.outcome === "WIN";
@@ -1213,32 +1038,16 @@ export default function App() {
     }
   };
 
-  const handleResetPaperAccount = async () => {
-    setStartingEquity(9965.73);
-    setActiveEquity(9965.73);
-    setPeakEquity(9965.73);
+  const handleResetPaperAccount = () => {
+    setActiveEquity(10000.0);
+    setPeakEquity(10000.0);
+    setVaultBalance(0.0);
+    setPrincipalSiphoned(false);
+    setNextMilestone(20000.0);
     setActiveCampaigns([]);
     setTradeHistory([]);
     setPopupAlerts([]);
     setActivePopup(null);
-    try {
-      localStorage.removeItem(STORAGE_KEY);
-    } catch {}
-
-    if (renderUrl) {
-      try {
-        const resetEndpoint = [renderUrl, "api", "reset"].join("/");
-        const res = await fetch(resetEndpoint, { method: "POST" });
-        if (res.ok) {
-          const json = await res.json();
-          const t = json.telemetry;
-          if (t) {
-            setActiveEquity(t.realized_base_equity ?? t.active_equity ?? 10000);
-            setPeakEquity(t.kelly?.peak_equity ?? t.active_equity ?? 10000);
-          }
-        }
-      } catch {}
-    }
   };
 
   return (
@@ -1365,7 +1174,7 @@ export default function App() {
           <div className="text-[11px] text-slate-400 flex items-center gap-3">
             <span>LAST TICK: <strong className="text-slate-200">{lastScanTime}</strong></span>
             <span>|</span>
-            <span>STARTING CAPITAL: <strong className="text-white">₹{startCap.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</strong></span>
+            <span>STARTING CAPITAL: <strong className="text-white">₹10,000.00</strong></span>
           </div>
         </div>
 
@@ -1516,35 +1325,35 @@ export default function App() {
               <div className="space-y-3">
                 <div className="grid grid-cols-2 sm:grid-cols-6 gap-3 text-xs">
                   <div className="p-2.5 bg-[#0B0F12] border border-[#1C242D]">
-                    <span className="text-[10px] text-slate-400 block">PAIR &amp; POSITION</span>
+                    <span className="text-[10px] text-slate-400 block">PAIR &amp; SIDE</span>
                     <strong className="text-white">
-                      {(pyramid as any).delta_symbol ? (pyramid as any).delta_symbol.replace(/[\/:]/g, "").replace(/USDUSD$/, "USD") : pyramid.symbol} ({pyramid.side} • {(pyramid as any).remaining_qty || (pyramid as any).live_qty || 76} lots)
+                      {pyramid.symbol} ({pyramid.side})
                     </strong>
                   </div>
                   <div className="p-2.5 bg-[#0B0F12] border border-[#1C242D]">
                     <span className="text-[10px] text-slate-400 block">ENTRY PRICE</span>
-                    <strong className="text-slate-200">${Number(pyramid.base_entry_price).toFixed(3)}</strong>
+                    <strong className="text-slate-200">${pyramid.base_entry_price}</strong>
                   </div>
                   <div className="p-2.5 bg-[#0B0F12] border border-[#1C242D]">
-                    <span className="text-[10px] text-slate-400 block">MARK PRICE (DELTA LIVE)</span>
-                    <strong className="text-[#97CEB4]">${Number(pyramid.current_price).toFixed(3)}</strong>
+                    <span className="text-[10px] text-slate-400 block">LIVE MARKET PRICE</span>
+                    <strong className="text-[#97CEB4]">${pyramid.current_price}</strong>
                   </div>
                   <div className="p-2.5 bg-[#0B0F12] border border-[#1C242D]">
-                    <span className="text-[10px] text-slate-400 block">NOTIONAL VALUE</span>
-                    <strong className="text-slate-200">
-                      ${((pyramid as any).notional_usd ?? (pyramid.total_notional_inr / 85.0)).toFixed(2)} USD (₹{pyramid.total_notional_inr.toLocaleString("en-IN")})
+                    <span className="text-[10px] text-slate-400 block">HIGH-PROB TP1 (+0.75 ATR)</span>
+                    <strong className="text-[#97CEB4]">
+                      ${pyramid.tp1_price} {pyramid.tp1_hit ? "(75% BANKED ✅)" : "(75% Take-Profit)"}
                     </strong>
                   </div>
                   <div className="p-2.5 bg-[#0B0F12] border border-[#1C242D]">
-                    <span className="text-[10px] text-slate-400 block">HARDWARE STOP</span>
+                    <span className="text-[10px] text-slate-400 block">EFFECTIVE STOP</span>
                     <strong className="text-amber-300">
-                      ${pyramid.effective_stop} {pyramid.breakeven_locked ? "(PROFIT LOCKED 🔒)" : "(Protective Stop)"}
+                      ${pyramid.effective_stop} {pyramid.breakeven_locked ? "(PROFIT LOCKED 🔒)" : "(1.35×ATR)"}
                     </strong>
                   </div>
                   <div className="p-2.5 bg-[#0B0F12] border border-[#1C242D]">
-                    <span className="text-[10px] text-slate-400 block">UNREALIZED PNL (DELTA 1:1)</span>
+                    <span className="text-[10px] text-slate-400 block">TOTAL TRADE PNL</span>
                     <strong className={unrealizedPnl >= 0 ? "text-[#97CEB4]" : "text-[#FF0055]"}>
-                      {((pyramid as any).unrealized_pnl_usd ?? (unrealizedPnl / 85.0)) >= 0 ? "+" : ""}{((pyramid as any).unrealized_pnl_usd ?? (unrealizedPnl / 85.0)).toFixed(2)} USD ({((pyramid as any).return_pct ?? (unrealizedPnl / Math.max(activeEquity, 1) * 100)) >= 0 ? "+" : ""}{((pyramid as any).return_pct ?? (unrealizedPnl / Math.max(activeEquity, 1) * 100)).toFixed(2)}% • {unrealizedPnl >= 0 ? "+" : ""}₹{unrealizedPnl.toFixed(2)})
+                      {unrealizedPnl >= 0 ? "+" : ""}₹{unrealizedPnl.toLocaleString("en-IN")}
                     </strong>
                   </div>
                 </div>

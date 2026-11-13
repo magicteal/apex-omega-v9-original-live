@@ -47,6 +47,17 @@ UNIVERSE_MAP = [
 STATE_PATH = Path(__file__).parent / "bot_state.json"
 BOOT_TIME = time.time()
 
+def _detect_outbound_ip() -> str:
+    try:
+        req = urllib.request.Request("https://api.ipify.org", headers={"User-Agent": "ApexOmegaV9/9.0"})
+        with urllib.request.urlopen(req, timeout=3.0) as resp:
+            return resp.read().decode("utf-8").strip()
+    except Exception:
+        return "UNKNOWN"
+
+SERVER_OUTBOUND_IP = _detect_outbound_ip()
+
+
 app = FastAPI(title="APEX-OMEGA OS V9.0 Dual-Core Hyper-Compounder", version="9.0.0")
 app.add_middleware(
     CORSMiddleware,
@@ -99,7 +110,7 @@ class AutonomousDaemonV9:
             except Exception:
                 pass
         return {
-            "mode": os.getenv("EXECUTION_MODE", "PAPER").strip().upper(),
+            "mode": os.getenv("EXECUTION_MODE", "LIVE").strip().upper(),
             "starting_equity": float(os.getenv("STARTING_EQUITY_INR", "10000.0")),
             "active_equity": float(os.getenv("STARTING_EQUITY_INR", "10000.0")),
             "peak_equity": float(os.getenv("STARTING_EQUITY_INR", "10000.0")),
@@ -172,56 +183,164 @@ class AutonomousDaemonV9:
 
     async def scan_and_execute_cycle(self) -> None:
         loop = asyncio.get_running_loop()
-        for display_sym, ticker, kraken_pair in UNIVERSE_MAP:
+
+        # 0. Parallelize all 10 pair kline fetches + live Delta account telemetry simultaneously (<300ms total latency!)
+        async def _fetch_one(display_sym: str, ticker: str, kraken_pair: str) -> None:
             ohlcv, src = await loop.run_in_executor(None, self._fetch_multi_exchange_klines, ticker, kraken_pair)
             if ohlcv and len(ohlcv) >= 30:
                 sig = self.squeeze_engine.evaluate_ohlcv(display_sym, ohlcv, feed_source=src)
                 self.scanner_cache[display_sym] = sig.to_dict()
 
+        tasks = [_fetch_one(d_sym, tkr, krk) for d_sym, tkr, krk in UNIVERSE_MAP]
+        if self.live_router.is_live():
+            tasks.append(self.live_router.sync_fast_account_telemetry())
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+        # Sync real Delta wallet balance immediately when available
+        if self.live_router.is_live() and self.live_router.last_synced_balance_inr:
+            real_bal = self.live_router.last_synced_balance_inr
+            if self.state.get("total_closed_trades", 0) == 0 and not self.active_campaigns:
+                self.state["starting_equity"] = real_bal
+            if not self.active_campaigns:
+                self.state["active_equity"] = real_bal
+                if real_bal > float(self.state.get("peak_equity", 0.0)):
+                    self.state["peak_equity"] = real_bal
+
         self.last_scan_ts = datetime.now(timezone.utc).isoformat()
 
-        # 1. Update all currently open campaigns (and sync live Delta Exchange stops/exits if EXECUTION_MODE=LIVE)
+        # Adopt and reconcile any existing open positions directly from Delta Exchange
+        if self.live_router.is_live() and self.live_router.live_positions_cache:
+            open_camps_syms = {c["symbol"] for c in self.active_campaigns}
+            open_camps_delta_syms = {c.get("delta_symbol") for c in self.active_campaigns if c.get("delta_symbol")}
+            for scan_sym, pos_data in self.live_router.live_positions_cache.items():
+                d_sym = pos_data.get("delta_symbol")
+                contracts = float(pos_data.get("contracts", 0.0))
+                if (scan_sym not in open_camps_syms and d_sym not in open_camps_delta_syms) and contracts > 0:
+                    side = pos_data.get("side", "LONG")
+                    entry_p = float(pos_data.get("entry_price") or 0.0)
+                    mark_p = float(pos_data.get("mark_price") or entry_p)
+                    notional_usd = contracts * (entry_p if entry_p > 0 else mark_p)
+                    notional_inr = round(notional_usd * self.live_router.usd_inr_rate, 2)
+                    direction = 1.0 if side == "LONG" else -1.0
+                    stop_dist = 0.0040
+                    initial_stop = fmt_price(entry_p * (1.0 - direction * stop_dist)) if entry_p > 0 else mark_p
+                    stage2_trig = fmt_price(entry_p * (1.0 + direction * 0.0068)) if entry_p > 0 else mark_p
+                    stage4_tp = fmt_price(entry_p * (1.0 + direction * 0.0160)) if entry_p > 0 else mark_p
+
+                    adopted_camp = {
+                        "trade_id": f"DELTA-{d_sym}-{int(time.time())}",
+                        "symbol": scan_sym,
+                        "delta_symbol": d_sym,
+                        "side": side,
+                        "setup_type": "DELTA_LIVE_SYNC",
+                        "confluence_score": 98,
+                        "entry_time": datetime.now(timezone.utc).isoformat(),
+                        "entry_ts": time.time(),
+                        "base_entry_price": fmt_price(entry_p),
+                        "current_price": fmt_price(mark_p),
+                        "highest_extreme": fmt_price(mark_p),
+                        "atr_at_entry": round(entry_p * 0.005, 4) if entry_p > 0 else 0.01,
+                        "tp1_price": stage2_trig,
+                        "tp2_price": stage4_tp,
+                        "tp1_hit": False,
+                        "tp1_banked_pnl_inr": 0.0,
+                        "ratchet_stage": 0,
+                        "chandelier_stop": initial_stop,
+                        "breakeven_locked": False,
+                        "breakeven_stop": None,
+                        "effective_stop": initial_stop,
+                        "filled_units": 1,
+                        "max_stage_reached": "V9_SNIPER_OPEN",
+                        "total_notional_inr": notional_inr,
+                        "total_unrealized_pnl_inr": float(pos_data.get("unrealized_pnl_inr", 0.0)),
+                        "rvol_at_entry": 1.5,
+                        "live_qty": contracts,
+                        "remaining_qty": contracts,
+                        "tranches": [
+                            {
+                                "id": 1,
+                                "label": f"DELTA_LIVE ({contracts} LOTS)",
+                                "weight_pct": 1.0,
+                                "trigger_atr_mult": 0.0,
+                                "trigger_price": fmt_price(entry_p),
+                                "filled": True,
+                                "fill_price": fmt_price(entry_p),
+                                "notional_inr": notional_inr,
+                                "unrealized_pnl_inr": float(pos_data.get("unrealized_pnl_inr", 0.0)),
+                                "fee_inr": round(notional_inr * self.FEE_RATE, 2),
+                            }
+                        ],
+                    }
+                    self.active_campaigns.append(adopted_camp)
+                    self.save_state()
+
+        # Check if any live campaign was closed externally on Delta
+        if self.live_router.is_live() and not self.live_router.last_error and hasattr(self.live_router, "markets_loaded") and self.live_router.markets_loaded:
+            live_cache = self.live_router.live_positions_cache
+            for camp in list(self.active_campaigns):
+                d_sym = camp.get("delta_symbol")
+                sym = camp.get("symbol")
+                if d_sym and (sym not in live_cache and d_sym not in live_cache):
+                    self.close_campaign(camp, exit_price=camp.get("current_price", camp.get("base_entry_price", 0.0)), reason="DELTA_EXTERNAL_CLOSE")
+
+        # 1. Update all currently open campaigns & sync live Delta positions / Open PnL / hardware stops
         for camp in list(self.active_campaigns):
             sym = camp["symbol"]
+            live_pos = self.live_router.live_positions_cache.get(sym) if self.live_router.is_live() else None
             live_item = self.scanner_cache.get(sym)
-            if live_item:
-                prev_stage = camp.get("ratchet_stage", 0)
-                prev_stop = camp.get("effective_stop")
-                self._update_campaign(camp, live_item["price"])
-                if self.live_router.is_live() and camp.get("delta_symbol"):
-                    if camp not in self.active_campaigns:
-                        # Campaign was closed by Stage 4, 25m Scratch, or Ratchet/Stop -> close on Delta Exchange!
-                        await self.live_router.close_live_trade(
+            tick_price = float(live_pos["mark_price"]) if (live_pos and live_pos.get("mark_price")) else (live_item["price"] if live_item else camp["current_price"])
+
+            prev_stage = camp.get("ratchet_stage", 0)
+            prev_stop = camp.get("effective_stop")
+            self._update_campaign(camp, tick_price)
+
+            # Override open PnL with exact real-time Delta Exchange unrealized PnL if live position is active
+            if live_pos and camp in self.active_campaigns:
+                camp["total_unrealized_pnl_inr"] = live_pos["unrealized_pnl_inr"]
+                if camp.get("tranches"):
+                    camp["tranches"][0]["unrealized_pnl_inr"] = round(
+                        live_pos["unrealized_pnl_inr"] + float(camp.get("tp1_banked_pnl_inr", 0.0)), 2
+                    )
+
+            if self.live_router.is_live() and camp.get("delta_symbol"):
+                if camp not in self.active_campaigns:
+                    await self.live_router.close_live_trade(
+                        camp["delta_symbol"],
+                        camp["side"],
+                        float(camp.get("remaining_qty") or camp.get("live_qty") or 0.0),
+                        camp.get("stop_order_id"),
+                    )
+                    real_bal = await self.live_router.fetch_inr_balance()
+                    if real_bal is not None and real_bal > 0:
+                        self.state["active_equity"] = real_bal
+                        if real_bal > float(self.state.get("peak_equity", 0.0)):
+                            self.state["peak_equity"] = real_bal
+                        if self.state.get("trade_history"):
+                            self.state["trade_history"][0]["balance_after_inr"] = real_bal
+                        self.save_state()
+                else:
+                    new_stage = camp.get("ratchet_stage", 0)
+                    new_stop = camp.get("effective_stop")
+                    if new_stage >= 2 and prev_stage < 2:
+                        st2 = await self.live_router.bank_stage2_50pct_and_move_stop(
                             camp["delta_symbol"],
                             camp["side"],
                             float(camp.get("remaining_qty") or camp.get("live_qty") or 0.0),
                             camp.get("stop_order_id"),
+                            float(new_stop),
                         )
-                    else:
-                        new_stage = camp.get("ratchet_stage", 0)
-                        new_stop = camp.get("effective_stop")
-                        if new_stage >= 2 and prev_stage < 2:
-                            # Stage 2 reached: bank 50% at market & move hardware stop on remaining 50%
-                            st2 = await self.live_router.bank_stage2_50pct_and_move_stop(
-                                camp["delta_symbol"],
-                                camp["side"],
-                                float(camp.get("remaining_qty") or camp.get("live_qty") or 0.0),
-                                camp.get("stop_order_id"),
-                                float(new_stop),
-                            )
-                            camp["remaining_qty"] = st2["remaining_qty"]
-                            camp["stop_order_id"] = st2["stop_order_id"]
-                            self.save_state()
-                        elif new_stop != prev_stop:
-                            # Stage 0.5, Stage 1, or Stage 3 ratcheted stop up -> update hardware stop on Delta
-                            camp["stop_order_id"] = await self.live_router.update_hardware_stop(
-                                camp["delta_symbol"],
-                                camp["side"],
-                                float(camp.get("remaining_qty") or camp.get("live_qty") or 0.0),
-                                camp.get("stop_order_id"),
-                                float(new_stop),
-                            )
-                            self.save_state()
+                        camp["remaining_qty"] = st2["remaining_qty"]
+                        camp["stop_order_id"] = st2["stop_order_id"]
+                        self.save_state()
+                    elif new_stop != prev_stop:
+                        camp["stop_order_id"] = await self.live_router.update_hardware_stop(
+                            camp["delta_symbol"],
+                            camp["side"],
+                            float(camp.get("remaining_qty") or camp.get("live_qty") or 0.0),
+                            camp.get("stop_order_id"),
+                            float(new_stop),
+                        )
+                        self.save_state()
 
         # 2. Only open a new slot when ZERO currently open campaigns are unhedged (Stage < 0.5)
         now_s = time.time()
@@ -579,6 +698,10 @@ class AutonomousDaemonV9:
             "uptime_seconds": int(time.time() - BOOT_TIME),
             "last_scan_ts": self.last_scan_ts,
             "mode": "LIVE" if self.live_router.is_live() else self.state.get("mode", "PAPER"),
+            "server_outbound_ip": SERVER_OUTBOUND_IP,
+            "delta_wallet_inr": self.live_router.last_synced_balance_inr,
+            "delta_open_positions": self.live_router.live_positions_cache,
+            "delta_api_error": self.live_router.last_error,
             "starting_equity": float(os.getenv("STARTING_EQUITY_INR", "10000.0")),
             "active_equity": live_active,
             "realized_base_equity": round(float(self.state["active_equity"]), 2),
@@ -624,12 +747,11 @@ async def start_background_scanner() -> None:
                     daemon.clients.remove(ws)
             except Exception:
                 pass
-            await asyncio.sleep(5.0)
+            await asyncio.sleep(2.0)
 
     asyncio.create_task(loop())
 
 
-@app.get("/")
 @app.get("/health")
 @app.get("/api/ping")
 async def health_check() -> Dict[str, Any]:
@@ -642,6 +764,10 @@ async def health_check() -> Dict[str, Any]:
         "wins": daemon.state["wins"],
         "losses": daemon.state["losses"],
         "win_rate_pct": daemon.state["win_rate_pct"],
+        "execution_mode": "LIVE" if daemon.live_router.is_live() else "PAPER",
+        "server_outbound_ip": SERVER_OUTBOUND_IP,
+        "delta_wallet_inr": daemon.live_router.last_synced_balance_inr,
+        "delta_api_error": daemon.live_router.last_error,
     }
 
 
@@ -717,3 +843,25 @@ async def restore_server_state(req: RestoreStateRequest) -> Dict[str, Any]:
         daemon.save_state()
         return {"status": "RESTORED_FROM_BACKUP", "telemetry": daemon.build_payload()}
     return {"status": "NO_RESTORE_NEEDED", "telemetry": daemon.build_payload()}
+
+
+# Mount unified dashboard static build if available
+static_dir = os.path.join(os.path.dirname(__file__), "static")
+if not os.path.exists(static_dir):
+    static_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "backend", "static")
+if not os.path.exists(static_dir):
+    static_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "static")
+
+if os.path.exists(static_dir):
+    from fastapi.staticfiles import StaticFiles
+    from starlette.responses import FileResponse
+
+    @app.get("/")
+    async def serve_index():
+        idx_path = os.path.join(static_dir, "index.html")
+        if os.path.exists(idx_path):
+            return FileResponse(idx_path)
+        return FileResponse(os.path.join(static_dir, "404.html"))
+
+    app.mount("/", StaticFiles(directory=static_dir, html=True), name="dashboard")
+    print(f"Dashboard static files mounted successfully from: {static_dir}")
