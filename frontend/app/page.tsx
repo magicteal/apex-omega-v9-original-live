@@ -112,7 +112,7 @@ const UNIVERSE_PAIRS = [
 ];
 
 // PASTE YOUR RENDER BACKEND URL HERE (OR IN VERCEL ENV NEXT_PUBLIC_API_URL) SO ALL DEVICES SYNC TO 1 SHARED 24/7 SERVER:
-const DEFAULT_RENDER_BACKEND_URL = "https://apex-omega-v9-original-live.onrender.com";
+const DEFAULT_RENDER_BACKEND_URL = "https://apex-omega-v9-live.onrender.com";
 
 function fmtPrice(val: number): number {
   if (!val || isNaN(val)) return 0;
@@ -122,8 +122,8 @@ function fmtPrice(val: number): number {
   return +val.toFixed(2);
 }
 
-const STORAGE_KEY = "apex_omega_real_state_v9_orig_live";
-const RENDER_URL_KEY = "apex_omega_render_url_v9_orig_live";
+const STORAGE_KEY = "apex_omega_real_state_v9_live";
+const RENDER_URL_KEY = "apex_omega_render_url_v9_live";
 
 function calcEma(values: number[], span: number): number[] {
   const alpha = 2.0 / (span + 1.0);
@@ -1015,7 +1015,7 @@ export default function App() {
     };
 
     runScan();
-    const timer = setInterval(runScan, 2000);
+    const timer = setInterval(runScan, 4000);
     return () => {
       active = false;
       clearInterval(timer);
@@ -1678,7 +1678,7 @@ export default function App() {
                   type="text"
                   value={renderUrlInput}
                   onChange={(e) => setRenderUrlInput(e.target.value)}
-                  placeholder="https://apex-omega-v9-original-live.onrender.com"
+                  placeholder="https://apex-omega-v9-live.onrender.com"
                   className="flex-1 bg-[#11161B] border border-[#1C242D] px-3 py-2 text-xs text-white focus:outline-none focus:border-[#97CEB4]"
                 />
                 <button
@@ -1703,7 +1703,7 @@ export default function App() {
                 In UptimeRobot, create an <strong>HTTP(s) Monitor</strong> (Interval: 5 minutes) pointing to your Render backend&apos;s <code className="text-[#97CEB4]">/health</code> endpoint so Render never sleeps:
               </p>
               <div className="p-2.5 bg-[#11161B] border border-[#1C242D] text-[#97CEB4] select-all">
-                {renderUrl ? `${renderUrl}/health` : "https://apex-omega-v9-original-live.onrender.com/health"}
+                {renderUrl ? `${renderUrl}/health` : "https://apex-omega-v9-live.onrender.com/health"}
               </div>
               <div className="flex items-center justify-between pt-2">
                 <span className="text-[11px] text-slate-400">Need to start a fresh ₹10,000 test run?</span>
